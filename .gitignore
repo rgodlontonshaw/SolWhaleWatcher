@@ -1,0 +1,5 @@
+.venv/Lib
+.idea/
+__pycache__/
+.env
+.venv/
