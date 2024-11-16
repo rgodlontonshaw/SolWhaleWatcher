@@ -1,5 +1,6 @@
 import requests
 from collections import defaultdict
+import time
 
 class Checker:
 
@@ -9,28 +10,43 @@ class Checker:
         self.wallet_holdings = {}
         self.FETCH_INTERVAL = 15 # fetch every 15 seconds
 
-    def fetch_wallet_data(self, wallet_address):
-        try:
-            response = requests.post(
-                self.api_url,
-                json={"jsonrpc": "2.0", "id": 1, "method": "getTokenAccountsByOwner", "params": [
-                    wallet_address,
-                    {"programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"},
-                    {"encoding": "jsonParsed"}
-                ]}
-            )
-            response.raise_for_status()
-            data = response.json()
+    def fetch_wallet_data(self, wallet_address, max_retries=5):
+        retries = 0
+        while retries < max_retries:
+            try:
+                response = requests.post(
+                    self.api_url,
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "getTokenAccountsByOwner",
+                        "params": [
+                            wallet_address,
+                            {"programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"},
+                            {"encoding": "jsonParsed"},
+                        ],
+                    },
+                )
+                response.raise_for_status()
+                data = response.json()
 
-            balances = {}
-            for account in data.get("result", {}).get("value", []):
-                token = account["account"]["data"]["parsed"]["info"]["mint"]
-                balance = float(account["account"]["data"]["parsed"]["info"]["tokenAmount"]["uiAmount"])
-                balances[token] = balance
-            return balances
-        except requests.exceptions.RequestException as e:
-            print(f"Error fetching wallet data for {wallet_address}: {str(e)}")
-            return {}
+                # Parse token balances
+                balances = {}
+                for account in data.get("result", {}).get("value", []):
+                    token = account["account"]["data"]["parsed"]["info"]["mint"]
+                    balance = float(account["account"]["data"]["parsed"]["info"]["tokenAmount"]["uiAmount"])
+                    balances[token] = balance
+                return balances
+            except requests.exceptions.RequestException as e:
+                print(f"Error fetching wallet data for {wallet_address}: {str(e)}")
+                retries += 1
+                if retries < max_retries:
+                    wait_time = 2 ** retries  # Exponential backoff
+                    print(f"Retrying in {wait_time} seconds...")
+                    time.sleep(wait_time)
+                else:
+                    print("Max retries reached. Skipping this wallet.")
+                    return {}
 
     def monitor_changes(self, wallet, new_data, initial_holdings, transaction_records):
         changes = []
