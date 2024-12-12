@@ -3,12 +3,10 @@ import os
 from dotenv import load_dotenv
 from checker import Checker
 from discord_notif import DiscordNotifier
-from token_checker import TokenAnalyzer
 from whale_tracker import WhaleTracker
 from collections import defaultdict
 
 load_dotenv()
-
 
 def main():
     API_KEY = os.getenv("API_KEY")
@@ -20,7 +18,6 @@ def main():
     # Initialize classes
     checker = Checker(api_url=HELIUS_API_URL, wallets=WALLETS)
     discord_notifier = DiscordNotifier(webhook_url=DISCORD_WEBHOOK_URL)
-    token_analyzer = TokenAnalyzer(api_url=HELIUS_API_URL)
     whale_tracker = WhaleTracker(api_url=HELIUS_API_URL, discord_notifier=discord_notifier)
 
     print("Starting tracking for wallets...\n")
@@ -57,24 +54,13 @@ def main():
                         print(f"Skipping token {token} (excluded from tracking).")
                         continue
                     print(f"More than 2 wallets {action} token {token}, performing token analysis...")
-                    token_analysis = token_analyzer.analyze_token(token)
-
-                    # Prepare Discord notification message
-                    message = f"🚨 Token Analysis for {token}:\n"
-                    message += f"Status: {token_analysis.get('status', 'Unknown')}\n"
-                    message += f"Reason: {token_analysis.get('reason', 'No reason available')}\n"
-                    message += f"Total Supply: {token_analysis.get('total_supply', 0)}\n"
-                    message += f"Top Holders' Ownership: {token_analysis.get('top_percent', 0)}%\n"
-                    message += "Top Holders:\n"
-                    for holder in token_analysis.get("top_holders", []):
-                        message += f"- Address: {holder['address']}, Balance: {holder['balance']}\n"
+                    message += f"More than 2 wallets detected performing action: {action}\n"
                     discord_notifier.send_notification(message)
 
         print("\nTracking whale activity...")
-        whale_tracker.track_whale_activity(token_address="your_token_address", token_supply=1000000, decimals=6)
+        whale_tracker.track_whale_activity(WALLETS)
 
         time.sleep(checker.FETCH_INTERVAL)
-
 
 if __name__ == "__main__":
     main()
