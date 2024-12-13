@@ -16,73 +16,80 @@ class WebSocketTracker:
         self.token_holdings = defaultdict(dict)  # Store wallet token balances
 
     def on_message(self, ws, message):
-        print("Raw message received:", message)
-        data = json.loads(message)
-        print("Parsed message:", data)
+        try:
+            data = json.loads(message)
+            
+            if "method" in data and data["method"] == "logsNotification":
+                log_data = data.get("params", {}).get("result", {})
+                if not log_data:
+                    print("No log data found.")
+                    return
 
-        if "method" in data and data["method"] == "logsNotification":
-            log_data = data["params"]["result"]
-            print("Transaction log received:", log_data)
+                # Debugging log structure
+                print("Debug log_data:", log_data)
 
-            # Extract the transaction signature
-            signature = log_data.get("signature")
-            if signature:
-                # Fetch detailed transaction data
-                transaction_details = self.fetch_transaction_details(signature)
-                if transaction_details:
-                    print("Detailed transaction:", transaction_details)
-                    transaction = self.process_transaction(transaction_details)
-                    if transaction:
-                        self.analyze_transaction(transaction)
-        elif "method" in data and data["method"] == "accountNotification":
-            print("Account notification received:", data["params"])
-            # Process account notification here
-        elif "error" in data:
-            print("Error received:", data["error"])
-        else:
-            print("Subscription response or other message:", data)
+                # Extract the transaction signature
+                signature = log_data.get("signature")
+                if signature:
+                    print(f"Transaction signature received: {signature}")
+                    transaction_details = self.fetch_transaction_details(signature)
+                    if transaction_details:
+                        transaction = self.process_transaction(transaction_details)
+                        if transaction:
+                            self.analyze_transaction(transaction)
+            elif "method" in data and data["method"] == "accountNotification":
+                print("Account notification received:", data["params"])
+            elif "error" in data:
+                print("Error received:", data["error"])
+            else:
+                print("Subscription response or other message:", data)
+        except Exception as e:
+            print(f"Error processing WebSocket message: {e}")
 
 
 
     def process_transaction(self, transaction_details):
-        """Extract relevant transaction information from Helius transaction details."""
         try:
-            # Assuming transaction_details is a list with one transaction
-            transaction_info = transaction_details[0]
+            transaction_info = transaction_details[0] if isinstance(transaction_details, list) else transaction_details
             wallet = transaction_info.get("source")
-            token_address = transaction_info.get("tokenTransfers", [{}])[0].get("mint")
-            token_amount = float(transaction_info.get("tokenTransfers", [{}])[0].get("amount", 0))
-            usd_value = float(transaction_info.get("tokenTransfers", [{}])[0].get("amountUsd", 0))
+            token_transfers = transaction_info.get("tokenTransfers", [])
+            
+            if token_transfers:
+                for transfer in token_transfers:
+                    token_address = transfer.get("mint")
+                    token_amount = float(transfer.get("amount", 0))
+                    usd_value = float(transfer.get("amountUsd", 0))
 
-            if wallet and token_address and token_amount != 0:
-                return {
-                    "wallet": wallet,
-                    "token_address": token_address,
-                    "token_amount": token_amount,
-                    "usd_value": usd_value,
-                }
-            else:
-                print("Transaction data is incomplete.")
-                return None
+                    if wallet and token_address and token_amount != 0:
+                        return {
+                            "wallet": wallet,
+                            "token_address": token_address,
+                            "token_amount": token_amount,
+                            "usd_value": usd_value,
+                        }
+            print("No valid token transfers found.")
+            return None
         except Exception as e:
             print(f"Error processing transaction: {e}")
             return None
 
     
     def fetch_transaction_details(self, signature):
-        """Fetch detailed transaction data using the Helius API."""
         try:
             url = f"https://api.helius.xyz/v0/transactions/?api-key={self.api_key}"
-            payload = {
-                "transactions": [signature]
-            }
+            payload = {"transactions": [signature]}
             response = requests.post(url, json=payload)
             response.raise_for_status()
             transaction_details = response.json()
+
+            # Debug the API response
+            print("Transaction details response:", transaction_details)
+            
             return transaction_details
         except Exception as e:
             print(f"Error fetching transaction details: {e}")
             return None
+
 
     def analyze_transaction(self, transaction):
         """Analyze the transaction for buy/sell actions and trigger conditions."""
