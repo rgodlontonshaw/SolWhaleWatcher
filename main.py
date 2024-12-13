@@ -1,168 +1,218 @@
 import os
 import json
-import time
 import requests
-import websocket
-from dotenv import load_dotenv
-from collections import defaultdict
+import time
+from websocket import create_connection
 
-load_dotenv()
-
-class WebSocketTracker:
-    def __init__(self, api_key, wallets, hummingbot_trigger):
-        self.api_key = api_key
+class SolanaWalletMonitor:
+    def __init__(self, http_url, wss_url, wallets):
+        """
+        :param http_url:  HTTP endpoint (Helius or standard Solana RPC)
+        :param wss_url:   WebSocket endpoint (Helius or standard Solana WS)
+        :param wallets:   List of wallet addresses to monitor
+        """
+        self.http_url = http_url
+        self.wss_url = wss_url
         self.wallets = wallets
-        self.hummingbot_trigger = hummingbot_trigger
-        self.token_holdings = defaultdict(dict)  # Store wallet token balances
 
-    def on_message(self, ws, message):
+        # Store "previous known" token balances for each wallet:
+        # balances_dict = {
+        #    wallet_address: { token_mint: amount_float, ... }
+        # }
+        self.balances_dict = {}
+
+        # WebSocket connection
+        self.ws = None
+
+    def start(self):
+        """Entry point to initialize balances and begin WebSocket subscription."""
+        # 1) Initialize baseline balances
+        self._init_wallet_balances()
+
+        # 2) Connect WebSocket
+        self.ws = create_connection(self.wss_url)
+        print(f"WebSocket connected to {self.wss_url}")
+
+        # 3) Subscribe logs for each wallet
+        for w in self.wallets:
+            sub_msg = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "logsSubscribe",
+                "params": [
+                    {"mentions": [w]},
+                    {"encoding": "jsonParsed"}
+                ]
+            }
+            self.ws.send(json.dumps(sub_msg))
+
+        print("WebSocket subscribed to logs for wallets:", self.wallets)
+
+        # 4) Listen for real-time logs
+        self._listen_loop()
+
+    def _init_wallet_balances(self):
+        """Fetch each wallet's token balances once, store them for baseline."""
+        for wallet in self.wallets:
+            self.balances_dict[wallet] = self._fetch_token_balances(wallet)
+
+    def _fetch_token_balances(self, wallet):
+        """
+        Using `getTokenAccountsByOwner` to retrieve SPL token accounts for `wallet`.
+        Returns { mint: ui_amount }.
+        """
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getTokenAccountsByOwner",
+            "params": [
+                wallet,
+                {"programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"},
+                {"encoding": "jsonParsed"}
+            ]
+        }
+
         try:
-            data = json.loads(message)
-            
-            if "method" in data and data["method"] == "logsNotification":
-                log_data = data.get("params", {}).get("result", {})
-                if not log_data:
-                    print("No log data found.")
-                    return
-
-                # Debugging log structure
-                print("Debug log_data:", log_data)
-
-                # Extract the transaction signature
-                signature = log_data.get("signature")
-                if signature:
-                    print(f"Transaction signature received: {signature}")
-                    transaction_details = self.fetch_transaction_details(signature)
-                    if transaction_details:
-                        transaction = self.process_transaction(transaction_details)
-                        if transaction:
-                            self.analyze_transaction(transaction)
-            elif "method" in data and data["method"] == "accountNotification":
-                print("Account notification received:", data["params"])
-            elif "error" in data:
-                print("Error received:", data["error"])
-            else:
-                print("Subscription response or other message:", data)
+            resp = requests.post(self.http_url, json=payload).json()
+            accounts = resp.get("result", {}).get("value", [])
+            token_balances = {}
+            for account in accounts:
+                info = account["account"]["data"]["parsed"]["info"]
+                mint = info["mint"]
+                amount_str = info["tokenAmount"]["amount"]
+                decimals = info["tokenAmount"]["decimals"]
+                ui_amount = float(amount_str) / (10 ** decimals)
+                token_balances[mint] = ui_amount
+            return token_balances
         except Exception as e:
-            print(f"Error processing WebSocket message: {e}")
+            print(f"Error fetching token balances for {wallet}: {e}")
+            return {}
 
+    def _listen_loop(self):
+        """Continuously receive log messages, parse and detect buy/sell changes."""
+        while True:
+            try:
+                message = self.ws.recv()
+                self._handle_logs_message(message)
+            except Exception as e:
+                print("WebSocket error:", e)
+                time.sleep(5)  # wait & retry
 
+    def _handle_logs_message(self, message):
+        """Called when WebSocket receives logs. Extract the tx signature & parse changes."""
+        msg = json.loads(message)
+        if "method" in msg and msg["method"] == "logsNotification":
+            params = msg.get("params", {})
+            value = params.get("result", {})
+            signature = value.get("signature", "")
+            if signature:
+                self._process_transaction(signature)
 
-    def process_transaction(self, transaction_details):
+    def _process_transaction(self, signature):
+        """
+        For each new signature referencing the monitored wallets, fetch full tx and detect net token changes.
+        """
+        tx = self._get_transaction(signature)
+        if not tx:
+            return
+
+        # For each wallet, compare old vs new balances => detect BUY/SELL
+        for w in self.wallets:
+            new_balances = self._fetch_token_balances(w)
+            old_balances = self.balances_dict.get(w, {})
+
+            self._detect_and_print_orders(w, old_balances, new_balances)
+
+            # Update baseline
+            self.balances_dict[w] = new_balances
+
+    def _get_transaction(self, signature):
+        """Fetch full transaction details, needed to confirm the event is relevant."""
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getTransaction",
+            "params": [
+                signature,
+                {"encoding":"jsonParsed"}
+            ]
+        }
         try:
-            transaction_info = transaction_details[0] if isinstance(transaction_details, list) else transaction_details
-            wallet = transaction_info.get("source")
-            token_transfers = transaction_info.get("tokenTransfers", [])
-            
-            if token_transfers:
-                for transfer in token_transfers:
-                    token_address = transfer.get("mint")
-                    token_amount = float(transfer.get("amount", 0))
-                    usd_value = float(transfer.get("amountUsd", 0))
-
-                    if wallet and token_address and token_amount != 0:
-                        return {
-                            "wallet": wallet,
-                            "token_address": token_address,
-                            "token_amount": token_amount,
-                            "usd_value": usd_value,
-                        }
-            print("No valid token transfers found.")
-            return None
+            resp = requests.post(self.http_url, json=payload).json()
+            return resp.get("result", None)
         except Exception as e:
-            print(f"Error processing transaction: {e}")
+            print(f"Error fetching transaction {signature}: {e}")
             return None
 
-    
-    def fetch_transaction_details(self, signature):
-        try:
-            url = f"https://api.helius.xyz/v0/transactions/?api-key={self.api_key}"
-            payload = {"transactions": [signature]}
-            response = requests.post(url, json=payload)
-            response.raise_for_status()
-            transaction_details = response.json()
+    def _detect_and_print_orders(self, wallet, old_balances, new_balances):
+        """
+        Compare old vs. new for each token. If new > old => BUY, if new < old => SELL.
+        Print approximate USD value.
+        """
+        # Check tokens that remain or were newly minted
+        for mint, new_amount in new_balances.items():
+            old_amount = old_balances.get(mint, 0.0)
+            delta = new_amount - old_amount
+            if abs(delta) > 1e-9:  # significant change
+                usd_value = self._get_usd_value(mint, abs(delta))
+                if delta > 0:
+                    # BUY
+                    print(f"BUY ORDER: Wallet: {wallet}, Token: {mint}, Amount: {abs(delta):.4f}, USD: {usd_value:.2f}")
+                else:
+                    # SELL
+                    print(f"SELL ORDER: Wallet: {wallet}, Token: {mint}, Amount: {abs(delta):.4f}, USD: {usd_value:.2f}")
 
-            # Debug the API response
-            print("Transaction details response:", transaction_details)
-            
-            return transaction_details
-        except Exception as e:
-            print(f"Error fetching transaction details: {e}")
-            return None
+        # Check tokens that disappeared (ex: old but not in new)
+        for mint, old_amt in old_balances.items():
+            if mint not in new_balances:
+                # means new balance is 0
+                usd_value = self._get_usd_value(mint, old_amt)
+                print(f"SELL ORDER: Wallet: {wallet}, Token: {mint}, Amount: {old_amt:.4f}, USD: {usd_value:.2f}")
 
-
-    def analyze_transaction(self, transaction):
-        """Analyze the transaction for buy/sell actions and trigger conditions."""
-        wallet = transaction["wallet"]
-        token_address = transaction["token_address"]
-        token_amount = transaction["token_amount"]
-        usd_value = transaction["usd_value"]
-
-        # Identify Buy or Sell
-        if wallet not in self.token_holdings or token_address not in self.token_holdings[wallet]:
-            print(f"BUY ORDER: Wallet: {wallet}, Token: {token_address}, Amount: {token_amount}, USD: {usd_value}")
-            self.token_holdings[wallet][token_address] = token_amount  # Update holdings
+    def _get_usd_value(self, mint_address, token_amount):
+        """
+        Mock method to convert a (mint, amount) into approximate USD value.
+        - Real code would do a token price lookup.
+        """
+        if mint_address == "So11111111111111111111111111111111111111112":  # Fake SOL mint
+            return token_amount * 20.0
         else:
-            previous_amount = self.token_holdings[wallet][token_address]
-            if token_amount > previous_amount:  # Buy detected
-                print(f"BUY ORDER: Wallet: {wallet}, Token: {token_address}, Amount: {token_amount}, USD: {usd_value}")
-            elif token_amount < previous_amount:  # Sell detected
-                print(f"SELL ORDER: Wallet: {wallet}, Token: {token_address}, Amount: {token_amount}, USD: {usd_value}")
-            self.token_holdings[wallet][token_address] = token_amount  # Update holdings
+            return token_amount * 1.0
 
-        # Trigger Hummingbot
-        if usd_value > 10000 or usd_value > 0.5 * sum(self.token_holdings[wallet].values()):
-            self.trigger_hummingbot(transaction)
-
-    def trigger_hummingbot(self, transaction):
-        """Trigger Hummingbot based on large transactions."""
-        wallet = transaction["wallet"]
-        token_address = transaction["token_address"]
-        usd_value = transaction["usd_value"]
-        print(f"HUMMINGBOT TRIGGERED: Whale {wallet} performed a large transaction on Token {token_address} worth ${usd_value}!")
-
-    def start_websocket(self):
-        """Start WebSocket connection to Helius API."""
-        ws_url = f"wss://rpc.helius.xyz/?api-key={self.api_key}"
-
-        def on_open(ws):
-            print("WebSocket connection established.")
-            # Subscribe to transactions for specific wallets
-            wallets = [wallet.strip() for wallet in self.wallets]
-            for wallet in self.wallets:
-                subscription_message = {
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "logsSubscribe",
-                    "params": [
-                        {"mentions": [wallet]}, 
-                        {"encoding": "jsonParsed"}
-                    ]
-                }
-                print("Sending subscription message:", subscription_message)  # Debug
-                ws.send(json.dumps(subscription_message))
-                time.sleep(0.5)  
-
-        def on_error(ws, error):
-            print(f"WebSocket error: {error}")
-
-        def on_close(ws, close_status_code, close_msg):
-            print("WebSocket connection closed.")
-
-        ws = websocket.WebSocketApp(
-            ws_url,
-            on_message=self.on_message,
-            on_error=on_error,
-            on_close=on_close
-        )
-        ws.on_open = on_open
-        ws.run_forever()
+    def close(self):
+        """Close the WebSocket cleanly."""
+        if self.ws:
+            self.ws.close()
+            self.ws = None
 
 
 if __name__ == "__main__":
-    API_KEY = os.getenv("API_KEY")
-    WALLETS = os.getenv("WALLETS").split(',')
+    # 1) Load env vars
+    API_KEY = os.environ.get("API_KEY")  # e.g. 72af8c8c-f916-4b84-a44d-5f0fb52765d6
+    wallets_str = os.environ.get("WALLETS", "")  # Comma-separated
+    WALLETS = [w.strip() for w in wallets_str.split(",") if w.strip()]
 
-    # Initialize tracker and start monitoring
-    tracker = WebSocketTracker(api_key=API_KEY, wallets=WALLETS, hummingbot_trigger=True)
-    tracker.start_websocket()
+    if not API_KEY:
+        print("Warning: No API_KEY found. Using a None key might cause 401 errors on Helius.")
+    if not WALLETS:
+        print("Warning: No WALLETS specified. Set WALLETS env var to a comma-separated list of addresses.")
+
+    # 2) Construct Helius endpoints (or any other RPC you want)
+    if API_KEY:
+        HTTP_URL = f"https://api.helius.xyz/rpc?api-key={API_KEY}"
+        WSS_URL = f"wss://rpc.helius.xyz/?api-key={API_KEY}"
+    else:
+        # Fallback if no key
+        HTTP_URL = "https://api.mainnet-beta.solana.com"
+        WSS_URL = "wss://api.mainnet-beta.solana.com"
+
+    print("Using HTTP URL:", HTTP_URL)
+    print("Using WSS  URL:", WSS_URL)
+    print("Monitoring wallets:", WALLETS)
+
+    monitor = SolanaWalletMonitor(http_url=HTTP_URL, wss_url=WSS_URL, wallets=WALLETS)
+    try:
+        monitor.start()
+    except KeyboardInterrupt:
+        monitor.close()
+        print("Monitoring stopped.")
