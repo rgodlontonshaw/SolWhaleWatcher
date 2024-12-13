@@ -4,7 +4,7 @@ class WhaleTracker:
     def __init__(self, api_url, discord_notifier):
         self.api_url = api_url
         self.discord_notifier = discord_notifier
-        self.transaction_threshold = 10000  # Threshold in USD for whale transactions
+        self.transaction_threshold = 1000  # Threshold in USD for whale transactions
 
     def fetch_recent_transactions_for_wallets(self, wallets):
         """
@@ -62,7 +62,6 @@ class WhaleTracker:
         else:
             print("No significant whale activity detected.")
 
-# Example usage
 if __name__ == "__main__":
     api_url = "https://api.helius.xyz/rpc"
     discord_notifier = "https://discord.com/api/webhooks/1316203213904674876/92pAC4yFDL3rAbWH6TfyWXkQnKknZjWeNjZDtU111m6Ua-3J9iYp56_4_9wZuyK4OPAs"  # Replace with actual Discord notifier instance
@@ -72,4 +71,4 @@ if __name__ == "__main__":
 
     # tracker.track_whale_activity(whale_wallets)
 
-    tracker.track_whale_activity(wallets=WALLETS)
+    tracker.track_whale_activity(WALLETS)
