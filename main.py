@@ -1,66 +1,145 @@
-import time
 import os
+import json
+import time
+import requests
+import websocket
 from dotenv import load_dotenv
-from checker import Checker
-from discord_notif import DiscordNotifier
-from whale_tracker import WhaleTracker
 from collections import defaultdict
 
 load_dotenv()
 
-def main():
-    API_KEY = os.getenv("API_KEY")
-    DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
-    WALLETS = os.getenv("WALLETS").split(',')
+class WebSocketTracker:
+    def __init__(self, api_key, wallets, hummingbot_trigger):
+        self.api_key = api_key
+        self.wallets = wallets
+        self.hummingbot_trigger = hummingbot_trigger
+        self.token_holdings = defaultdict(dict)  # Store wallet token balances
 
-    HELIUS_API_URL = f"https://mainnet.helius-rpc.com/?api-key={API_KEY}"
+    def on_message(self, ws, message):
+        print("Raw message received:", message)  # Print raw WebSocket messages
+        data = json.loads(message)
+        print("Parsed message:", data)
 
-    # Initialize classes
-    checker = Checker(api_url=HELIUS_API_URL, wallets=WALLETS)
-    discord_notifier = DiscordNotifier(webhook_url=DISCORD_WEBHOOK_URL)
-    whale_tracker = WhaleTracker(api_url=HELIUS_API_URL, discord_notifier=discord_notifier)
+        log_data = None  # Initialize log_data to avoid unbound local variable error
+        if "method" in data and data["method"] == "logsNotification":
+            log_data = data["params"]["result"]
+            print("Transaction log received:", log_data)
+            
+            # Extract the transaction signature
+            signature = log_data.get("signature")
+            if signature:
+                # Fetch detailed transaction data
+                transaction_details = self.fetch_transaction_details(signature)
+                if transaction_details:
+                    print("Detailed transaction:", transaction_details)
+                    self.process_transaction(transaction_details)
 
-    print("Starting tracking for wallets...\n")
+        if "method" in data and data["method"] == "accountNotification":
+            print("Account notification received:", data["params"])
+            # Process account notification here
+        elif "error" in data:
+            print("Error received:", data["error"])
+        else:
+            print("Subscription response or other message:", data)
 
-    # Fetch initial holdings with a delay between wallets
-    initial_holdings = {}
-    for wallet in WALLETS:
-        initial_holdings[wallet] = checker.fetch_wallet_data(wallet)
-        time.sleep(1)  # Add a small delay between each wallet request
+        if log_data is not None:
+            transaction = self.process_transaction(data)
+            if transaction:
+                self.analyze_transaction(transaction)
 
-    print("Finished tracking initial state.\n")
 
-    print("Starting to monitor changes...\n")
-    while True:
-        # Monitor wallet changes and check for common transactions
-        transaction_records = {"buy": defaultdict(list), "sell": defaultdict(list)}
-        for wallet in WALLETS:
-            try:
-                new_data = checker.fetch_wallet_data(wallet)
-                changes = checker.monitor_changes(wallet, new_data, initial_holdings[wallet], transaction_records)
-                if changes:
-                    for change in changes:
-                        print(change)
-                initial_holdings[wallet] = new_data
-            except Exception as e:
-                print(f"Error monitoring wallet {wallet}: {str(e)}")
-            time.sleep(1)
+    def process_transaction(self, data):
+        """Extract relevant transaction information."""
+        # Parse the transaction data
+        try:
+            wallet = data.get("params", {}).get("result", {}).get("owner")
+            token_address = data.get("params", {}).get("result", {}).get("tokenAddress")
+            token_amount = float(data.get("params", {}).get("result", {}).get("amount", 0))
+            usd_value = float(data.get("params", {}).get("result", {}).get("usdValue", 0))
 
-        # Check for tokens with more than 2 buyers or sellers
-        for action, token_records in transaction_records.items():
-            for token, wallets_involved in token_records.items():
-                if len(wallets_involved) > 2:
-                    if token == "So11111111111111111111111111111111111111112":
-                        print(f"Skipping token {token} (excluded from tracking).")
-                        continue
-                    print(f"More than 2 wallets {action} token {token}, performing token analysis...")
-                    message += f"More than 2 wallets detected performing action: {action}\n"
-                    discord_notifier.send_notification(message)
+            if wallet and token_address and token_amount > 0:
+                return {
+                    "wallet": wallet,
+                    "token_address": token_address,
+                    "token_amount": token_amount,
+                    "usd_value": usd_value,
+                }
+        except Exception as e:
+            print(f"Error processing transaction: {e}")
+        return None
 
-        print("\nTracking whale activity...")
-        whale_tracker.track_whale_activity(WALLETS)
+    def analyze_transaction(self, transaction):
+        """Analyze the transaction for buy/sell actions and trigger conditions."""
+        wallet = transaction["wallet"]
+        token_address = transaction["token_address"]
+        token_amount = transaction["token_amount"]
+        usd_value = transaction["usd_value"]
 
-        time.sleep(checker.FETCH_INTERVAL)
+        # Identify Buy or Sell
+        if wallet not in self.token_holdings or token_address not in self.token_holdings[wallet]:
+            print(f"BUY ORDER: Wallet: {wallet}, Token: {token_address}, Amount: {token_amount}, USD: {usd_value}")
+            self.token_holdings[wallet][token_address] = token_amount  # Update holdings
+        else:
+            previous_amount = self.token_holdings[wallet][token_address]
+            if token_amount > previous_amount:  # Buy detected
+                print(f"BUY ORDER: Wallet: {wallet}, Token: {token_address}, Amount: {token_amount}, USD: {usd_value}")
+            elif token_amount < previous_amount:  # Sell detected
+                print(f"SELL ORDER: Wallet: {wallet}, Token: {token_address}, Amount: {token_amount}, USD: {usd_value}")
+            self.token_holdings[wallet][token_address] = token_amount  # Update holdings
+
+        # Trigger Hummingbot
+        if usd_value > 10000 or usd_value > 0.5 * sum(self.token_holdings[wallet].values()):
+            self.trigger_hummingbot(transaction)
+
+    def trigger_hummingbot(self, transaction):
+        """Trigger Hummingbot based on large transactions."""
+        wallet = transaction["wallet"]
+        token_address = transaction["token_address"]
+        usd_value = transaction["usd_value"]
+        print(f"HUMMINGBOT TRIGGERED: Whale {wallet} performed a large transaction on Token {token_address} worth ${usd_value}!")
+
+    def start_websocket(self):
+        """Start WebSocket connection to Helius API."""
+        ws_url = f"wss://rpc.helius.xyz/?api-key={self.api_key}"
+
+        def on_open(ws):
+            print("WebSocket connection established.")
+            # Subscribe to transactions for specific wallets
+            wallets = [wallet.strip() for wallet in self.wallets]
+            for wallet in self.wallets:
+                subscription_message = {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "accountSubscribe",
+                    "params": [
+                        wallet,
+                        {"encoding": "jsonParsed"}
+                    ]
+                }
+                print("Sending subscription message:", subscription_message)  # Debug
+                ws.send(json.dumps(subscription_message))
+                time.sleep(0.5)  
+
+        def on_error(ws, error):
+            print(f"WebSocket error: {error}")
+
+        def on_close(ws, close_status_code, close_msg):
+            print("WebSocket connection closed.")
+
+        ws = websocket.WebSocketApp(
+            ws_url,
+            on_message=self.on_message,
+            on_error=on_error,
+            on_close=on_close
+        )
+        ws.on_open = on_open
+        ws.run_forever()
+
 
 if __name__ == "__main__":
-    main()
+    API_KEY = os.getenv("API_KEY")
+    WALLETS = os.getenv("WALLETS").split(',')
+
+    # Initialize tracker and start monitoring
+    tracker = WebSocketTracker(api_key=API_KEY, wallets=WALLETS, hummingbot_trigger=True)
+    tracker.start_websocket()
