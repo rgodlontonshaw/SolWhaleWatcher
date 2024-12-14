@@ -156,6 +156,7 @@ def detect_buy_and_record(wallet, mint, delta_amount, timestamp_str, transaction
         whale_msg = f"**WHALE BUY ALERT** >= $10k\n{message}"
         discord_notifier.send_notifications(whale_msg)
         hummingbot_trigger(wallet, mint, usd_value)
+        print(whale_msg)
 
     transaction_records["buy"][mint].append(wallet)
 
