@@ -3,7 +3,7 @@ import time
 import requests
 from collections import defaultdict
 
-TIME_WINDOW_SECONDS = 300  # Only consider transactions from the last 5 minutes
+TIME_WINDOW_SECONDS = 30000  # Only consider transactions from the last 5 minutes
 
 # ------------------ ENV/CONFIG ------------------
 API_KEY = os.environ.get("API_KEY")  # e.g. '72af8c8c-f916-4b84-a44d-5f0fb52765d6'
@@ -172,6 +172,35 @@ def check_common_transactions(transaction_records):
                              f"Wallets: {wallets_involved}")
                 print(alert_msg)
                 discord_notifier.send_notifications(alert_msg)
+                
+def fetch_token_accounts_for_owner(wallet):
+    """
+    Returns a list of token account addresses (pubkeys) owned by 'wallet'.
+    Essentially a slightly modified version of 'fetch_token_balances' 
+    that collects token account pubkeys instead of building a mint->balance dict.
+    """
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getTokenAccountsByOwner",
+        "params": [
+            wallet,
+            {"programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"},
+            {"encoding": "jsonParsed"}
+        ]
+    }
+    try:
+        resp = requests.post(HTTP_URL, json=payload).json()
+        accounts = resp.get("result", {}).get("value", [])
+        token_account_addresses = []
+        for acct in accounts:
+            token_account_pubkey = acct["pubkey"]
+            token_account_addresses.append(token_account_pubkey)
+        return token_account_addresses
+    except Exception as e:
+        print(f"Error fetching token accounts for {wallet}: {e}")
+        return []
+
 
 # ------------------ MAIN LOOP ------------------
 def run_script():
@@ -196,36 +225,40 @@ def run_script():
 
             current_unix_time = time.time()
 
-            # Poll new signatures for each wallet
             for wallet in WALLETS:
-                sigs = get_signatures_for_address(wallet, limit=10)
-                for sig_info in sigs:
-                    signature = sig_info["signature"]
-                    block_time = sig_info.get("blockTime", 0)
-                    if not block_time:
-                        continue
+            # 1) Fetch all token accounts for this wallet
+                token_accounts = fetch_token_accounts_for_owner(wallet)  # returns a list of token account addresses
 
-                    if block_time < current_unix_time - TIME_WINDOW_SECONDS:
-                        continue
+                for ta_addr in token_accounts:
+                    # 2) Poll new signatures for each token account
+                    sigs = get_signatures_for_address(ta_addr, limit=10)
+                    for sig_info in sigs:
+                        signature = sig_info["signature"]
+                        block_time = sig_info.get("blockTime", 0)
+                        if not block_time:
+                            continue
 
-                    if signature not in known_signatures:
-                        known_signatures.add(signature)
-                        tx_details = get_transaction(signature)
-                        if tx_details:
-                            timestamp_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(block_time))
-                            old_bal = balances_dict.get(wallet, {})
-                            new_bal = fetch_token_balances(wallet)
+                        if block_time < current_unix_time - TIME_WINDOW_SECONDS:
+                            continue
 
-                            # Detect net inflows
-                            for mint, new_amt in new_bal.items():
-                                old_amt = old_bal.get(mint, 0.0)
-                                delta = new_amt - old_amt
-                                if delta > 1e-9:
-                                    # BUY
-                                    detect_buy_and_record(wallet, mint, delta, timestamp_str, transaction_records)
+                        if signature not in known_signatures:
+                            known_signatures.add(signature)
+                            tx_details = get_transaction(signature)
+                            if tx_details:
+                                timestamp_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(block_time))
+                                old_bal = balances_dict.get(wallet, {})
+                                new_bal = fetch_token_balances(wallet)
 
-                            # Update stored balances
-                            balances_dict[wallet] = new_bal
+                                # Detect net inflows
+                                for mint, new_amt in new_bal.items():
+                                    old_amt = old_bal.get(mint, 0.0)
+                                    delta = new_amt - old_amt
+                                    if delta > 1e-9:
+                                        detect_buy_and_record(wallet, mint, delta, timestamp_str, transaction_records)
+
+                                # Update stored balances
+                                balances_dict[wallet] = new_bal
+
 
             # Multi-wallet check
             check_common_transactions(transaction_records)
