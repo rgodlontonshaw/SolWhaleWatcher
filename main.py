@@ -214,7 +214,9 @@ def run_script():
 
     # 1) Init baseline balances
     for w in WALLETS:
+        print(f"Fetching initial balances for wallet: {w}")
         balances_dict[w] = fetch_token_balances(w)
+        print(f"Initial balances for {w}: {balances_dict[w]}")
 
     print(f"Starting polling loop every 5 seconds (only new transactions <= {TIME_WINDOW_SECONDS//60} min old)...")
 
@@ -227,24 +229,34 @@ def run_script():
             current_unix_time = time.time()
 
             for wallet in WALLETS:
-            # 1) Fetch all token accounts for this wallet
+                # 1) Fetch all token accounts for this wallet
+                print(f"Fetching token accounts for wallet: {wallet}")
                 token_accounts = fetch_token_accounts_for_owner(wallet)  # returns a list of token account addresses
+                print(f"Token accounts for {wallet}: {token_accounts}")
 
                 for ta_addr in token_accounts:
                     # 2) Poll new signatures for each token account
+                    print(f"Fetching signatures for token account: {ta_addr}")
                     sigs = get_signatures_for_address(ta_addr, limit=10)
+                    print(f"Signatures for {ta_addr}: {sigs}")
+
                     for sig_info in sigs:
                         signature = sig_info["signature"]
                         block_time = sig_info.get("blockTime", 0)
                         if not block_time:
+                            print(f"Skipping signature {signature} (no blockTime)")
                             continue
 
                         if block_time < current_unix_time - TIME_WINDOW_SECONDS:
+                            print(f"Skipping signature {signature} (older than time window)")
                             continue
 
                         if signature not in known_signatures:
+                            print(f"Processing new signature: {signature}")
                             known_signatures.add(signature)
                             tx_details = get_transaction(signature)
+                            print(f"Transaction details for {signature}: {tx_details}")
+
                             if tx_details:
                                 timestamp_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(block_time))
                                 old_bal = balances_dict.get(wallet, {})
@@ -260,11 +272,19 @@ def run_script():
                                 # Update stored balances
                                 balances_dict[wallet] = new_bal
 
-
             # Multi-wallet check
             check_common_transactions(transaction_records)
 
             time.sleep(5)
+
+        except KeyboardInterrupt:
+            print("Stopped by user.")
+            break
+        except Exception as e:
+            print("Error in main loop:", e)
+            # If connection or parse error, wait & retry
+            time.sleep(5)
+
 
         except KeyboardInterrupt:
             print("Stopped by user.")
