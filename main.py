@@ -12,8 +12,10 @@ WALLETS = [w.strip() for w in WALLETS_STR.split(",") if w.strip()]
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
 
 if not WALLETS:
-    WALLETS = ["D4zVhwuUsFbcaty7wJhNEZ7VEwPHXQ5d2heXPxM5yWhL"]  # fallback
+    # Fallback wallet if none provided
+    WALLETS = ["D4zVhwuUsFbcaty7wJhNEZ7VEwPHXQ5d2heXPxM5yWhL"]
 
+# Decide on the RPC endpoint (Helius vs. Solana)
 if API_KEY:
     HTTP_URL = f"https://api.helius.xyz/rpc?api-key={API_KEY}"
 else:
@@ -30,7 +32,7 @@ class DiscordNotifier:
 
     def send_notifications(self, message):
         if not self.webhook_url:
-            print("(No Discord Webhook set, skipping notification) ->", message)
+            print("(No Discord Webhook set) ->", message)
             return
         data = {"content": message}
         try:
@@ -45,11 +47,11 @@ discord_notifier = DiscordNotifier(DISCORD_WEBHOOK_URL)
 # ------------------ HUMMINGBOT TRIGGER ------------------
 def hummingbot_trigger(wallet, mint, usd_value):
     """
-    Stub function to 'trigger' Hummingbot if a buy is >= $10,000.
-    In practice, integrate with Hummingbot API or script.
+    If a net inflow (buy) is >= $10,000, we 'trigger' Hummingbot logic here.
     """
-    print(f"HUMMINGBOT TRIGGER: Whale Buy > $10,000. Wallet={wallet}, Mint={mint}, USD={usd_value:.2f}")
-    # e.g. requests.post(HUMMINGBOT_URL, json={...})
+    print(f"HUMMINGBOT TRIGGER: Whale Buy > $10,000! Wallet={wallet}, Mint={mint}, USD={usd_value:.2f}")
+    # In a real setup:
+    # requests.post(HUMMINGBOT_URL, json={...})
 
 # ------------------ PRICE LOGIC ------------------
 price_cache = {}
@@ -68,6 +70,8 @@ def get_coingecko_price(symbol: str):
 def _get_usd_value(mint_address, amount):
     """
     Convert token mint & amount => approx USD.
+    If it's the SOL mint, fetch Coingecko price every 30s. 
+    Otherwise fallback to $1 each.
     """
     global price_cache, last_price_fetch_ts
     SOL_MINT = "So11111111111111111111111111111111111111112"
@@ -82,7 +86,7 @@ def _get_usd_value(mint_address, amount):
         sol_price = price_cache.get("sol", 20.0)
         return amount * sol_price
     else:
-        return amount * 1.0  # fallback
+        return amount * 1.0
 
 # ------------------ RPC CALLS ------------------
 def get_signatures_for_address(wallet, limit=10):
@@ -97,15 +101,19 @@ def get_signatures_for_address(wallet, limit=10):
 
 def get_transaction(signature):
     payload = {
-        "jsonrpc":"2.0",
-        "id":1,
-        "method":"getTransaction",
-        "params":[signature, {"encoding":"jsonParsed"}]
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getTransaction",
+        "params": [signature, {"encoding":"jsonParsed"}]
     }
     resp = requests.post(HTTP_URL, json=payload).json()
     return resp.get("result")
 
 def fetch_token_balances(wallet):
+    """
+    Return {mint: ui_amount} for all SPL tokens the wallet currently holds.
+    This automatically picks up new tokens each iteration if the wallet acquires them.
+    """
     payload = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -130,48 +138,53 @@ def fetch_token_balances(wallet):
 
 # ------------------ BUY HANDLING & MULTI-WALLET ALERT ------------------
 def detect_buy_and_record(wallet, mint, delta_amount, timestamp_str, transaction_records):
-    """We found a net inflow (BUY). Alert Discord, check if >= $10k => hummingbot, store in transaction_records."""
+    """
+    If net inflow > 0, print a BUY. If >= $10k => trigger Hummingbot & Discord.
+    Also record in transaction_records for multi-wallet detection.
+    """
     usd_value = _get_usd_value(mint, delta_amount)
 
-    # Always notify Discord for any buy
-    message = f"[{timestamp_str}] BUY WHALE ALERT: Wallet={wallet}, Mint={mint}, Amount={delta_amount:.4f}, USD={usd_value:.2f}"# console log
-    print(message)  
-    # Big buy check
+    message = (f"[{timestamp_str}] BUY: Wallet={wallet}, Mint={mint}, "
+               f"Amount={delta_amount:.4f}, USD={usd_value:.2f}")
+    print(message)
+
+    # Discord: any BUY event
+    discord_notifier.send_notifications(message)
+
+    # Whale check
     if usd_value >= 10000:
-        whale_msg = f"**WHALE BUY ALERT** (>= $10K)\n{message}"
+        whale_msg = f"**WHALE BUY ALERT** >= $10k\n{message}"
         discord_notifier.send_notifications(whale_msg)
         hummingbot_trigger(wallet, mint, usd_value)
-        print(whale_msg)  
 
-    # Record for multi-wallet detection
     transaction_records["buy"][mint].append(wallet)
 
 def check_common_transactions(transaction_records):
     """
-    If more than 2 wallets bought the same token in this cycle => multi-wallet Discord alert
+    If more than 2 distinct wallets bought the same token this cycle => multi-wallet Discord alert.
     """
     for action in ["buy", "sell"]:
         for token, wallet_list in transaction_records[action].items():
             if len(wallet_list) > 2:
                 action_message = "bought" if action == "buy" else "sold"
                 wallets_involved = ", ".join(wallet_list)
-                alert_msg = (
-                    f"ALERT: More than 2 wallets {action_message} the same token ({token}) this cycle!\n"
-                    f"Wallets: {wallets_involved}"
-                )
+                alert_msg = (f"ALERT: More than 2 wallets {action_message} token {token} in this cycle!\n"
+                             f"Wallets: {wallets_involved}")
                 print(alert_msg)
                 discord_notifier.send_notifications(alert_msg)
 
 # ------------------ MAIN LOOP ------------------
 def main():
     known_signatures = set()
+    # Store old balances per wallet: {wallet_addr: {mint: amount}}
     balances_dict = {}
+    # transaction_records for multi-wallet detection
     transaction_records = {
         "buy": defaultdict(list),
         "sell": defaultdict(list),
     }
 
-    # Initialize baseline balances
+    # 1) Init baseline token balances for each wallet
     for w in WALLETS:
         balances_dict[w] = fetch_token_balances(w)
 
@@ -179,43 +192,47 @@ def main():
 
     while True:
         try:
-            # Clear records each iteration
+            # Clear transaction records each loop iteration
             transaction_records["buy"].clear()
             transaction_records["sell"].clear()
 
             current_unix_time = time.time()
 
+            # 2) Poll new signatures for each wallet
             for wallet in WALLETS:
                 sigs = get_signatures_for_address(wallet, limit=10)
                 for sig_info in sigs:
                     signature = sig_info["signature"]
                     block_time = sig_info.get("blockTime", 0)  # epoch seconds
                     if not block_time:
-                        continue  # skip if no blockTime
+                        # skip if no blockTime data
+                        continue
 
+                    # skip old transactions
                     if block_time < current_unix_time - TIME_WINDOW_SECONDS:
-                        # older than TIME_WINDOW_SECONDS, skip
                         continue
 
                     if signature not in known_signatures:
                         known_signatures.add(signature)
                         tx_details = get_transaction(signature)
                         if tx_details:
+                            # transaction is valid, check net inflows
                             timestamp_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(block_time))
                             old_bal = balances_dict.get(wallet, {})
                             new_bal = fetch_token_balances(wallet)
 
-                            # Detect net inflows
+                            # Compare token by token
                             for mint, new_amt in new_bal.items():
                                 old_amt = old_bal.get(mint, 0.0)
                                 delta = new_amt - old_amt
-                                if delta > 1e-9:  # net positive => BUY
+                                if delta > 1e-9:
+                                    # BUY
                                     detect_buy_and_record(wallet, mint, delta, timestamp_str, transaction_records)
 
-                            # Update baseline
+                            # Update stored balances
                             balances_dict[wallet] = new_bal
 
-            # Check if multiple wallets bought the same token
+            # 3) Multi-wallet check
             check_common_transactions(transaction_records)
 
             time.sleep(5)
@@ -225,6 +242,7 @@ def main():
             break
         except Exception as e:
             print("Error in main loop:", e)
+            # If there's a connection or parse error, wait & retry
             time.sleep(5)
 
 if __name__ == "__main__":
