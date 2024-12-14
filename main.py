@@ -174,17 +174,15 @@ def check_common_transactions(transaction_records):
                 discord_notifier.send_notifications(alert_msg)
 
 # ------------------ MAIN LOOP ------------------
-def main():
+def run_script():
     known_signatures = set()
-    # Store old balances per wallet: {wallet_addr: {mint: amount}}
     balances_dict = {}
-    # transaction_records for multi-wallet detection
     transaction_records = {
         "buy": defaultdict(list),
         "sell": defaultdict(list),
     }
 
-    # 1) Init baseline token balances for each wallet
+    # 1) Init baseline balances
     for w in WALLETS:
         balances_dict[w] = fetch_token_balances(w)
 
@@ -192,23 +190,21 @@ def main():
 
     while True:
         try:
-            # Clear transaction records each loop iteration
+            # Clear transaction records each iteration
             transaction_records["buy"].clear()
             transaction_records["sell"].clear()
 
             current_unix_time = time.time()
 
-            # 2) Poll new signatures for each wallet
+            # Poll new signatures for each wallet
             for wallet in WALLETS:
                 sigs = get_signatures_for_address(wallet, limit=10)
                 for sig_info in sigs:
                     signature = sig_info["signature"]
-                    block_time = sig_info.get("blockTime", 0)  # epoch seconds
+                    block_time = sig_info.get("blockTime", 0)
                     if not block_time:
-                        # skip if no blockTime data
                         continue
 
-                    # skip old transactions
                     if block_time < current_unix_time - TIME_WINDOW_SECONDS:
                         continue
 
@@ -216,12 +212,11 @@ def main():
                         known_signatures.add(signature)
                         tx_details = get_transaction(signature)
                         if tx_details:
-                            # transaction is valid, check net inflows
                             timestamp_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(block_time))
                             old_bal = balances_dict.get(wallet, {})
                             new_bal = fetch_token_balances(wallet)
 
-                            # Compare token by token
+                            # Detect net inflows
                             for mint, new_amt in new_bal.items():
                                 old_amt = old_bal.get(mint, 0.0)
                                 delta = new_amt - old_amt
@@ -232,7 +227,7 @@ def main():
                             # Update stored balances
                             balances_dict[wallet] = new_bal
 
-            # 3) Multi-wallet check
+            # Multi-wallet check
             check_common_transactions(transaction_records)
 
             time.sleep(5)
@@ -242,8 +237,25 @@ def main():
             break
         except Exception as e:
             print("Error in main loop:", e)
-            # If there's a connection or parse error, wait & retry
+            # If connection or parse error, wait & retry
             time.sleep(5)
+
+def main():
+    """
+    Outer loop that re-runs `run_script()` if a fatal error occurs 
+    (e.g. internet cut off), so script doesn't fully exit.
+    """
+    while True:
+        try:
+            run_script()
+            break  # If run_script completes gracefully, exit the loop.
+        except KeyboardInterrupt:
+            print("User interrupted; exiting outer loop.")
+            break
+        except Exception as e:
+            print("Fatal error, retry in 10s:", e)
+            time.sleep(10)
+            # Loop re-runs run_script()
 
 if __name__ == "__main__":
     main()
