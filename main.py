@@ -18,30 +18,41 @@ client = discord.Client(intents=intents)
 
 
 # Function to Parse Whale Alert Notifications
+# Function to Parse Whale Alert Notifications
 def parse_notification(notification):
     """
-    Example Message Format: "Wallet X bought Y tokens for $12,345"
+    Example Message Format from Screenshot:
+    "From: 90.736 SOL ($19,768.94) To: 186.58K LUCE ($19,954.50) @ $0.11"
     """
-    match = re.search(r"Wallet (.+?) bought (.+?) tokens for \$(\d+,\d+)", notification)
+    match = re.search(
+        r"From: ([\d.]+) SOL \(\$([\d,]+.\d+)\) To: ([\d.]+[A-Za-z]*) (\w+) \(\$([\d,]+.\d+)\) @ \$(\d+\.\d+)",
+        notification
+    )
     if match:
-        wallet = match.group(1)
-        token = match.group(2)
-        amount_usd = float(match.group(3).replace(",", ""))
-        return wallet, token, amount_usd
+        sol_amount = float(match.group(1))
+        sol_usd = float(match.group(2).replace(",", ""))
+        token_amount = match.group(3)
+        token_symbol = match.group(4)
+        token_usd = float(match.group(5).replace(",", ""))
+        token_price = float(match.group(6))
+        return sol_amount, sol_usd, token_amount, token_symbol, token_usd, token_price
     return None
 
 # Function to Trigger Hummingbot
-def trigger_hummingbot(wallet, token, amount_usd):
+def trigger_hummingbot(sol_amount, sol_usd, token_amount, token_symbol, token_usd, token_price):
     payload = {
-        "wallet": wallet,
-        "token": token,
-        "amount_usd": amount_usd,
+        "sol_amount": sol_amount,
+        "sol_usd": sol_usd,
+        "token_amount": token_amount,
+        "token_symbol": token_symbol,
+        "token_usd": token_usd,
+        "token_price": token_price,
         "strategy": "whale_buy"
     }
     try:
         response = requests.post(HUMMINGBOT_API_URL, json=payload)
         if response.status_code == 200:
-            print(f"Hummingbot triggered successfully for {token} (${amount_usd})")
+            print(f"Hummingbot triggered successfully for {token_symbol} (${token_usd})")
         else:
             print(f"Failed to trigger Hummingbot: {response.text}")
     except Exception as e:
@@ -61,21 +72,32 @@ async def on_message(message):
 
     # Debugging: Log received messages
     print(f"Message received: {message.content} in channel {message.channel.id}")
-    
-
-    # Respond to !ping command
-    if message.channel.id == int(DISCORD_CHANNEL_ID):
-        if message.content.strip() == "!ping":  # Match exact "!ping"
-            await message.channel.send("Pong!")  #
 
     # Check if the message is in the specified channel
     if message.channel.id == DISCORD_CHANNEL_ID:
-        details = parse_notification(message.content)
-        if details:
-            wallet, token, amount_usd = details
-            if amount_usd >= 10000:  # Only trigger if the amount is $10,000 or more
-                print(f"Whale Alert Detected: Wallet={wallet}, Token={token}, Amount=${amount_usd:.2f}")
-                trigger_hummingbot(wallet, token, amount_usd)
+        # Handle plain text messages
+        if message.content.strip():
+            details = parse_notification(message.content)
+            if details:
+                process_notification(details)
+
+        # Handle embedded content
+        if message.embeds:
+            for embed in message.embeds:
+                if embed.description:  # The embed may contain useful information
+                    print(f"Embed description: {embed.description}")
+                    details = parse_notification(embed.description)
+                    if details:
+                        process_notification(details)
+
+def process_notification(details):
+    """
+    Handle notification details after parsing.
+    """
+    sol_amount, sol_usd, token_amount, token_symbol, token_usd, token_price = details
+    if token_usd >= 10000:  # Example condition
+        print(f"Whale Alert Detected: SOL={sol_amount}, Token={token_symbol}, Amount=${token_usd:.2f}")
+        trigger_hummingbot(sol_amount, sol_usd, token_amount, token_symbol, token_usd, token_price)
 
 # Run the Discord Bot
 client.run(DISCORD_TOKEN)
