@@ -5,8 +5,7 @@ from collections import defaultdict
 
 TIME_WINDOW_SECONDS = 300  # Only consider transactions from the last 5 minutes
 
-# -------------- CONFIG & ENV --------------
-
+# ------------------ ENV/CONFIG ------------------
 API_KEY = os.environ.get("API_KEY")  # e.g. '72af8c8c-f916-4b84-a44d-5f0fb52765d6'
 WALLETS_STR = os.environ.get("WALLETS", "")
 WALLETS = [w.strip() for w in WALLETS_STR.split(",") if w.strip()]
@@ -24,29 +23,35 @@ print("HTTP_URL:", HTTP_URL)
 print("Polling wallets for recent BUYs (within 5 min):", WALLETS)
 print("Discord Webhook URL:", DISCORD_WEBHOOK_URL if DISCORD_WEBHOOK_URL else "No Webhook set")
 
-# -------------- DISCORD NOTIFIER --------------
-
+# ------------------ DISCORD NOTIFIER ------------------
 class DiscordNotifier:
     def __init__(self, webhook_url):
         self.webhook_url = webhook_url
 
     def send_notifications(self, message):
-        """Simple text message to Discord webhook."""
         if not self.webhook_url:
-            print("No Discord Webhook URL set; skipping Discord notification.")
+            print("(No Discord Webhook set, skipping notification) ->", message)
             return
         data = {"content": message}
         try:
             resp = requests.post(self.webhook_url, json=data)
             if resp.status_code >= 300:
-                print(f"Discord notification failed with status {resp.status_code}: {resp.text}")
+                print(f"Discord notification failed [{resp.status_code}]: {resp.text}")
         except Exception as e:
             print("Discord notification error:", e)
 
 discord_notifier = DiscordNotifier(DISCORD_WEBHOOK_URL)
 
-# -------------- PRICE LOGIC --------------
+# ------------------ HUMMINGBOT TRIGGER ------------------
+def hummingbot_trigger(wallet, mint, usd_value):
+    """
+    Stub function to 'trigger' Hummingbot if a buy is >= $10,000.
+    In practice, integrate with Hummingbot API or script.
+    """
+    print(f"HUMMINGBOT TRIGGER: Whale Buy > $10,000. Wallet={wallet}, Mint={mint}, USD={usd_value:.2f}")
+    # e.g. requests.post(HUMMINGBOT_URL, json={...})
 
+# ------------------ PRICE LOGIC ------------------
 price_cache = {}
 last_price_fetch_ts = 0
 
@@ -77,10 +82,9 @@ def _get_usd_value(mint_address, amount):
         sol_price = price_cache.get("sol", 20.0)
         return amount * sol_price
     else:
-        return amount * 1.0
+        return amount * 1.0  # fallback
 
-# -------------- RPC CALLS --------------
-
+# ------------------ RPC CALLS ------------------
 def get_signatures_for_address(wallet, limit=10):
     payload = {
         "jsonrpc": "2.0",
@@ -124,37 +128,45 @@ def fetch_token_balances(wallet):
         token_dict[mint] = ui_amount
     return token_dict
 
-# -------------- BUY DETECTION & MULTI-WALLET ALERT --------------
-
+# ------------------ BUY HANDLING & MULTI-WALLET ALERT ------------------
 def detect_buy_and_record(wallet, mint, delta_amount, timestamp_str, transaction_records):
-    """We found a net inflow (BUY). Save it in transaction_records & print."""
+    """We found a net inflow (BUY). Alert Discord, check if >= $10k => hummingbot, store in transaction_records."""
     usd_value = _get_usd_value(mint, delta_amount)
-    print(f"[{timestamp_str}] BUY: Wallet={wallet}, Mint={mint}, Amount={delta_amount:.4f}, USD={usd_value:.2f}")
 
-    # Record the buy in transaction_records for multi-wallet detection
+    # Always notify Discord for any buy
+    message = f"[{timestamp_str}] BUY: Wallet={wallet}, Mint={mint}, Amount={delta_amount:.4f}, USD={usd_value:.2f}"
+    print(message)  # console log
+    discord_notifier.send_notifications(message)
+
+    # Big buy check
+    if usd_value >= 10000:
+        whale_msg = f"**WHALE BUY ALERT** (>= $10K)\n{message}"
+        discord_notifier.send_notifications(whale_msg)
+        hummingbot_trigger(wallet, mint, usd_value)
+
+    # Record for multi-wallet detection
     transaction_records["buy"][mint].append(wallet)
 
 def check_common_transactions(transaction_records):
     """
-    If more than 2 wallets bought the same token in this cycle => Discord alert
+    If more than 2 wallets bought the same token in this cycle => multi-wallet Discord alert
     """
     for action in ["buy", "sell"]:
         for token, wallet_list in transaction_records[action].items():
             if len(wallet_list) > 2:
                 action_message = "bought" if action == "buy" else "sold"
                 wallets_involved = ", ".join(wallet_list)
-                message = (
-                    f"ALERT: More than 2 wallets {action_message} token {token}!\n"
+                alert_msg = (
+                    f"ALERT: More than 2 wallets {action_message} the same token ({token}) this cycle!\n"
                     f"Wallets: {wallets_involved}"
                 )
-                print(message)
-                discord_notifier.send_notifications(message)
+                print(alert_msg)
+                discord_notifier.send_notifications(alert_msg)
 
-# -------------- MAIN LOOP --------------
-
+# ------------------ MAIN LOOP ------------------
 def main():
     known_signatures = set()
-    balances_dict = {}  # { wallet: {mint: amount}}
+    balances_dict = {}
     transaction_records = {
         "buy": defaultdict(list),
         "sell": defaultdict(list),
@@ -164,11 +176,11 @@ def main():
     for w in WALLETS:
         balances_dict[w] = fetch_token_balances(w)
 
-    print("Starting polling loop every 5 seconds...only recent transactions (<5 mins).")
+    print(f"Starting polling loop every 5 seconds (only new transactions <= {TIME_WINDOW_SECONDS//60} min old)...")
 
     while True:
         try:
-            # Clear transaction records each iteration
+            # Clear records each iteration
             transaction_records["buy"].clear()
             transaction_records["sell"].clear()
 
@@ -180,19 +192,16 @@ def main():
                     signature = sig_info["signature"]
                     block_time = sig_info.get("blockTime", 0)  # epoch seconds
                     if not block_time:
-                        # If blockTime is None or 0, might be incomplete info
-                        continue
+                        continue  # skip if no blockTime
 
-                    # Skip old transactions
                     if block_time < current_unix_time - TIME_WINDOW_SECONDS:
-                        # older than 5 minutes, skip
+                        # older than TIME_WINDOW_SECONDS, skip
                         continue
 
                     if signature not in known_signatures:
                         known_signatures.add(signature)
                         tx_details = get_transaction(signature)
                         if tx_details:
-                            # Create a human-readable timestamp
                             timestamp_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(block_time))
                             old_bal = balances_dict.get(wallet, {})
                             new_bal = fetch_token_balances(wallet)
