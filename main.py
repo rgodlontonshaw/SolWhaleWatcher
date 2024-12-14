@@ -134,14 +134,14 @@ def detect_buy_and_record(wallet, mint, delta_amount, timestamp_str, transaction
     usd_value = _get_usd_value(mint, delta_amount)
 
     # Always notify Discord for any buy
-    message = f"[{timestamp_str}] BUY: Wallet={wallet}, Mint={mint}, Amount={delta_amount:.4f}, USD={usd_value:.2f}"# console log
-
+    message = f"[{timestamp_str}] BUY WHALE ALERT: Wallet={wallet}, Mint={mint}, Amount={delta_amount:.4f}, USD={usd_value:.2f}"# console log
+    print(message)  
     # Big buy check
     if usd_value >= 10000:
         whale_msg = f"**WHALE BUY ALERT** (>= $10K)\n{message}"
         discord_notifier.send_notifications(whale_msg)
         hummingbot_trigger(wallet, mint, usd_value)
-        print(message)  
+        print(whale_msg)  
 
     # Record for multi-wallet detection
     transaction_records["buy"][mint].append(wallet)
