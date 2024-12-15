@@ -71,7 +71,15 @@ async def on_message(message):
         return
 
     # Debugging: Log received messages
+    if message.embeds:
+        for embed in message.embeds:
+            print(f"Embed details: {embed.to_dict()}")  # Convert embed to dictionary for better logging
+    else:
+        print("No embeds found in the message.")
     print(f"Message received: {message.content} in channel {message.channel.id}")
+    
+    
+
 
     # Check if the message is in the specified channel
     if message.channel.id == DISCORD_CHANNEL_ID:
@@ -84,11 +92,47 @@ async def on_message(message):
         # Handle embedded content
         if message.embeds:
             for embed in message.embeds:
-                if embed.description:  # The embed may contain useful information
-                    print(f"Embed description: {embed.description}")
-                    details = parse_notification(embed.description)
+                embed_data = embed.to_dict()  # Extract full embed as a dictionary
+                
+                from_field = None
+                to_field = None
+
+                # Extract 'From' and 'To' fields
+                for field in embed_data.get("fields", []):
+                    if field["name"] == "From":
+                        from_field = field["value"]
+                    elif field["name"] == "To":
+                        to_field = field["value"]
+
+                if from_field and to_field:
+                    print(f"Parsing From: {from_field}, To: {to_field}")
+                    details = parse_fields(from_field, to_field)
                     if details:
                         process_notification(details)
+                        
+    def parse_fields(from_field, to_field):
+        """
+        Parses 'From' and 'To' fields to extract token amounts and prices.
+
+        Example:
+        From: '45,593.488 [GRIFT] ($2,436.15) @ $0.05'
+        To: '<:solana:1272865291780624384> 10.561 [SOL] ($2,328.82)'
+        """
+        from_match = re.search(r"([\d,.]+) \[(\w+)\] \(\$(\d+,\d+\.\d+)\)", from_field)
+        to_match = re.search(r"([\d,.]+) \[(\w+)\] \(\$(\d+,\d+\.\d+)\)", to_field)
+        
+        if from_match and to_match:
+            from_amount = float(from_match.group(1).replace(",", ""))
+            from_token = from_match.group(2)
+            from_usd = float(from_match.group(3).replace(",", ""))
+
+            to_amount = float(to_match.group(1).replace(",", ""))
+            to_token = to_match.group(2)
+            to_usd = float(to_match.group(3).replace(",", ""))
+
+            return from_amount, from_token, from_usd, to_amount, to_token, to_usd
+        return None
+
 
 def process_notification(details):
     """
