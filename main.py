@@ -123,10 +123,10 @@ async def on_message(message):
 def parse_fields(from_field, to_field):
     """
     Parses 'From' and 'To' fields to extract amounts, token names, and USD values.
-    Handles optional emoji prefixes, URLs, and special characters in token names.
+    Handles optional emoji prefixes, URLs, and additional parts like '@ $0.00'.
     """
-    # Final regex to handle all scenarios
-    pattern = r"(?:<:\w+:\d+>\s*)?([\d,.]+[KMB]*) \[([^\]]+)\]\(https?:\/\/[^\)]+\) \(\$(\d+,\d+\.\d+|0\.00)\)"
+    # Enhanced regex to handle edge cases
+    pattern = r"(?:<:\w+:\d+>\s*)?([\d,.]+[KMB]*)\s+\[([^\]]+)\]\(https?:\/\/[^\)]+\)\s+\(\$(\d+(?:,\d{3})*\.\d+|0\.00)\)(?: @ \$[\d,.]+)?"
     
     from_match = re.search(pattern, from_field)
     to_match = re.search(pattern, to_field)
@@ -174,7 +174,7 @@ def process_notification(details):
     print(f"   To:   {to_amount} {to_token} (${to_usd:.2f})")
 
     # Trigger Hummingbot for transactions with a value > $1000
-    if from_usd >= 1000 or to_usd >= 1000:
+    if from_usd >= 10000 or to_usd >= 10000:
         print("🚨 High-value transaction detected! Triggering Hummingbot...")
         trigger_hummingbot(from_amount, from_usd, to_amount, to_token, to_usd)
     else:
