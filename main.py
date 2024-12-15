@@ -89,38 +89,35 @@ async def on_message(message):
             if details:
                 process_notification(details)
 
-        # Handle embedded content
-        if message.embeds:
-            for embed in message.embeds:
-                embed_data = embed.to_dict()  # Extract full embed as a dictionary
-                
-                from_field = None
-                to_field = None
+    if message.embeds:
+        for embed in message.embeds:
+            embed_data = embed.to_dict()  # Convert embed to dictionary
+            
+            from_field = None
+            to_field = None
 
-                # Extract 'From' and 'To' fields
-                for field in embed_data.get("fields", []):
-                    if field["name"] == "From":
-                        from_field = field["value"]
-                    elif field["name"] == "To":
-                        to_field = field["value"]
-
-                if from_field and to_field:
-                    print(f"Parsing From: {from_field}, To: {to_field}")
-                    details = parse_fields(from_field, to_field)
-                    if details:
-                        process_notification(details)
+            # Extract "From" and "To" fields
+            for field in embed_data.get("fields", []):
+                if field["name"] == "From":
+                    from_field = field["value"]
+                elif field["name"] == "To":
+                    to_field = field["value"]
+            
+            # Parse fields if both exist
+            if from_field and to_field:
+                print(f"Parsing From: {from_field}, To: {to_field}")
+                details = parse_fields(from_field, to_field)
+                if details:
+                    process_notification(details)
+                    
                         
-    def parse_fields(from_field, to_field):
+def parse_fields(from_field, to_field):
         """
         Parses 'From' and 'To' fields to extract amounts, token names, and USD values.
-        
-        Example 'From' field:
-            "58.45K [Fartcoin] ($35,179.10) @ $0.60"
-        Example 'To' field:
-            "<:solana:12345> 158.84 [SOL] ($34,731.74)"
+        Handles cases where the token price is $0.00.
         """
         # Regular expression to match: amount, token name, and USD value
-        pattern = r"([\d,.]+[KMB]*) \[(\w+)\] \(\$(\d+,\d+\.\d+)\)"
+        pattern = r"([\d,.]+[KMB]*) \[(\w+)\] \(\$(\d+,\d+\.\d+|0\.00)\)"
         
         from_match = re.search(pattern, from_field)
         to_match = re.search(pattern, to_field)
@@ -140,6 +137,7 @@ async def on_message(message):
         
         return None
 
+
 def convert_to_number(amount_str):
     """
     Converts amounts like '58.45K' to 58450.
@@ -157,12 +155,16 @@ def convert_to_number(amount_str):
 
 def process_notification(details):
     """
-    Handle notification details after parsing.
+    Handle parsed details from 'From' and 'To' fields.
     """
-    sol_amount, sol_usd, token_amount, token_symbol, token_usd, token_price = details
-    if token_usd >= 10000:  # Example condition
-        print(f"Whale Alert Detected: SOL={sol_amount}, Token={token_symbol}, Amount=${token_usd:.2f}")
-        trigger_hummingbot(sol_amount, sol_usd, token_amount, token_symbol, token_usd, token_price)
+    from_amount, from_token, from_usd, to_amount, to_token, to_usd = details
+    print(f"Swap Detected: {from_amount} {from_token} (${from_usd:.2f}) ➡ {to_amount} {to_token} (${to_usd:.2f})")
+    
+    # Trigger Hummingbot if any USD value exceeds the threshold
+    if from_usd >= 1000 or to_usd >= 1000:
+        print("High-value transaction detected, triggering Hummingbot...")
+        trigger_hummingbot(from_amount, from_usd, to_amount, to_token, to_usd)
+
 
 # Run the Discord Bot
 client.run(DISCORD_TOKEN)
