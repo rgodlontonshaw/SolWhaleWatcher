@@ -39,24 +39,28 @@ def parse_notification(notification):
     return None
 
 # Function to Trigger Hummingbot
-def trigger_hummingbot(sol_amount, sol_usd, token_amount, token_symbol, token_usd, token_price):
+def trigger_hummingbot(from_amount, from_usd, to_amount, to_token, to_usd):
+    """
+    Sends a request to Hummingbot with transaction details.
+    """
     payload = {
-        "sol_amount": sol_amount,
-        "sol_usd": sol_usd,
-        "token_amount": token_amount,
-        "token_symbol": token_symbol,
-        "token_usd": token_usd,
-        "token_price": token_price,
+        "from_amount": from_amount,
+        "from_usd": from_usd,
+        "to_amount": to_amount,
+        "to_token": to_token,
+        "to_usd": to_usd,
         "strategy": "whale_buy"
     }
+
     try:
-        response = requests.post(HUMMINGBOT_API_URL, json=payload)
+        response = requests.post("http://localhost:9000/api/trigger-strategy", json=payload)
         if response.status_code == 200:
-            print(f"Hummingbot triggered successfully for {token_symbol} (${token_usd})")
+            print(f"✅ Hummingbot triggered successfully for {to_token} (${to_usd:.2f})")
         else:
-            print(f"Failed to trigger Hummingbot: {response.text}")
+            print(f"❌ Failed to trigger Hummingbot: {response.text}")
     except Exception as e:
-        print(f"Error triggering Hummingbot: {e}")
+        print(f"⚠️ Error triggering Hummingbot: {e}")
+
 
 # Event Listener for Bot Startup
 @client.event
@@ -70,13 +74,13 @@ async def on_message(message):
     if message.author == client.user:
         return
 
-    # Debugging: Log received messages
-    if message.embeds:
-        for embed in message.embeds:
-            print(f"Embed details: {embed.to_dict()}")  # Convert embed to dictionary for better logging
-    else:
-        print("No embeds found in the message.")
-    print(f"Message received: {message.content} in channel {message.channel.id}")
+    # # Debugging: Log received messages
+    # if message.embeds:
+    #     for embed in message.embeds:
+    #         print(f"Embed details: {embed.to_dict()}")  # Convert embed to dictionary for better logging
+    # else:
+    #     print("No embeds found in the message.")
+    # print(f"Message received: {message.content} in channel {message.channel.id}")
     
     
 
@@ -104,43 +108,50 @@ async def on_message(message):
                     to_field = field["value"]
             
             # Parse fields if both exist
-            if from_field and to_field:
-                print(f"Parsing From: {from_field}, To: {to_field}")
-                details = parse_fields(from_field, to_field)
-                if details:
-                    process_notification(details)
+            # Parse fields if both "From" and "To" exist
+        if from_field and to_field:
+            print(f"Parsing From: {from_field}, To: {to_field}")
+            details = parse_fields(from_field, to_field)
+            print(f"Parsed details: {details}")  # Debug the output
+            if details:
+                process_notification(details)
+            else:
+                print("⚠️ Failed to parse fields. Check field format or regex.")
+
                     
                         
 def parse_fields(from_field, to_field):
-        """
-        Parses 'From' and 'To' fields to extract amounts, token names, and USD values.
-        Handles cases where the token price is $0.00.
-        """
-        # Regular expression to match: amount, token name, and USD value
-        pattern = r"([\d,.]+[KMB]*) \[(\w+)\] \(\$(\d+,\d+\.\d+|0\.00)\)"
+    """
+    Parses 'From' and 'To' fields to extract amounts, token names, and USD values.
+    Handles optional emoji prefixes, URLs, and special characters in token names.
+    """
+    # Final regex to handle all scenarios
+    pattern = r"(?:<:\w+:\d+>\s*)?([\d,.]+[KMB]*) \[([^\]]+)\]\(https?:\/\/[^\)]+\) \(\$(\d+,\d+\.\d+|0\.00)\)"
+    
+    from_match = re.search(pattern, from_field)
+    to_match = re.search(pattern, to_field)
+    
+    print(f"Debug From: {from_field}, Match: {from_match}")
+    print(f"Debug To: {to_field}, Match: {to_match}")
+
+    if from_match and to_match:
+        from_amount = convert_to_number(from_match.group(1))
+        from_token = from_match.group(2).strip()
+        from_usd = float(from_match.group(3).replace(",", ""))
         
-        from_match = re.search(pattern, from_field)
-        to_match = re.search(pattern, to_field)
+        to_amount = convert_to_number(to_match.group(1))
+        to_token = to_match.group(2).strip()
+        to_usd = float(to_match.group(3).replace(",", ""))
         
-        if from_match and to_match:
-            # Extract "From" details
-            from_amount = convert_to_number(from_match.group(1))
-            from_token = from_match.group(2)
-            from_usd = float(from_match.group(3).replace(",", ""))
-            
-            # Extract "To" details
-            to_amount = convert_to_number(to_match.group(1))
-            to_token = to_match.group(2)
-            to_usd = float(to_match.group(3).replace(",", ""))
-            
-            return from_amount, from_token, from_usd, to_amount, to_token, to_usd
-        
-        return None
+        return from_amount, from_token, from_usd, to_amount, to_token, to_usd
+    
+    print("⚠️ No match found!")
+    return None
 
 
 def convert_to_number(amount_str):
     """
-    Converts amounts like '58.45K' to 58450.
+    Converts amounts like '1.91M' to 1910000.
     Supports K (thousand), M (million), and B (billion).
     """
     amount_str = amount_str.replace(",", "")
@@ -158,12 +169,16 @@ def process_notification(details):
     Handle parsed details from 'From' and 'To' fields.
     """
     from_amount, from_token, from_usd, to_amount, to_token, to_usd = details
-    print(f"Swap Detected: {from_amount} {from_token} (${from_usd:.2f}) ➡ {to_amount} {to_token} (${to_usd:.2f})")
-    
-    # Trigger Hummingbot if any USD value exceeds the threshold
+    print(f"\n🔄 Swap Detected:")
+    print(f"   From: {from_amount} {from_token} (${from_usd:.2f})")
+    print(f"   To:   {to_amount} {to_token} (${to_usd:.2f})")
+
+    # Trigger Hummingbot for transactions with a value > $1000
     if from_usd >= 1000 or to_usd >= 1000:
-        print("High-value transaction detected, triggering Hummingbot...")
+        print("🚨 High-value transaction detected! Triggering Hummingbot...")
         trigger_hummingbot(from_amount, from_usd, to_amount, to_token, to_usd)
+    else:
+        print("ℹ️ Transaction value below threshold, Hummingbot not triggered.")
 
 
 # Run the Discord Bot
