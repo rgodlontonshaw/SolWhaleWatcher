@@ -112,26 +112,47 @@ async def on_message(message):
                         
     def parse_fields(from_field, to_field):
         """
-        Parses 'From' and 'To' fields to extract token amounts and prices.
-
-        Example:
-        From: '45,593.488 [GRIFT] ($2,436.15) @ $0.05'
-        To: '<:solana:1272865291780624384> 10.561 [SOL] ($2,328.82)'
+        Parses 'From' and 'To' fields to extract amounts, token names, and USD values.
+        
+        Example 'From' field:
+            "58.45K [Fartcoin] ($35,179.10) @ $0.60"
+        Example 'To' field:
+            "<:solana:12345> 158.84 [SOL] ($34,731.74)"
         """
-        from_match = re.search(r"([\d,.]+) \[(\w+)\] \(\$(\d+,\d+\.\d+)\)", from_field)
-        to_match = re.search(r"([\d,.]+) \[(\w+)\] \(\$(\d+,\d+\.\d+)\)", to_field)
+        # Regular expression to match: amount, token name, and USD value
+        pattern = r"([\d,.]+[KMB]*) \[(\w+)\] \(\$(\d+,\d+\.\d+)\)"
+        
+        from_match = re.search(pattern, from_field)
+        to_match = re.search(pattern, to_field)
         
         if from_match and to_match:
-            from_amount = float(from_match.group(1).replace(",", ""))
+            # Extract "From" details
+            from_amount = convert_to_number(from_match.group(1))
             from_token = from_match.group(2)
             from_usd = float(from_match.group(3).replace(",", ""))
-
-            to_amount = float(to_match.group(1).replace(",", ""))
+            
+            # Extract "To" details
+            to_amount = convert_to_number(to_match.group(1))
             to_token = to_match.group(2)
             to_usd = float(to_match.group(3).replace(",", ""))
-
+            
             return from_amount, from_token, from_usd, to_amount, to_token, to_usd
+        
         return None
+
+def convert_to_number(amount_str):
+    """
+    Converts amounts like '58.45K' to 58450.
+    Supports K (thousand), M (million), and B (billion).
+    """
+    amount_str = amount_str.replace(",", "")
+    if "K" in amount_str:
+        return float(amount_str.replace("K", "")) * 1_000
+    elif "M" in amount_str:
+        return float(amount_str.replace("M", "")) * 1_000_000
+    elif "B" in amount_str:
+        return float(amount_str.replace("B", "")) * 1_000_000_000
+    return float(amount_str)
 
 
 def process_notification(details):
